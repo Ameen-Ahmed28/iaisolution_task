@@ -16,7 +16,6 @@ from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
 # API clients
-import requests
 from groq import Groq
 
 load_dotenv()
@@ -27,44 +26,35 @@ class MultiModalRAGSystem:
     Production-ready Multi-Modal RAG with:
     - Document ingestion via PyMuPDF (no poppler needed)
     - Text, tables, images (OCR)
-    - Groq API for fast inference (FREE tier)
-    - OpenRouter API for diverse model access (FREE tier)
+    - Groq API for ultra-fast LLM inference (FREE tier)
     - ChromaDB for vector storage
     """
 
     def __init__(
         self,
         groq_api_key: Optional[str] = None,
-        openrouter_api_key: Optional[str] = None,
-        use_groq: bool = True,
     ):
         """
-        Initialize RAG system with API keys from environment
+        Initialize RAG system with Groq API
         
         Args:
-            groq_api_key: Groq API key (free tier available)
-            openrouter_api_key: OpenRouter API key (free tier available)
-            use_groq: Use Groq for LLM inference (recommended - fastest)
+            groq_api_key: Groq API key (free tier available at console.groq.com)
         """
-        # BUG FIX #1: Strip whitespace from API keys
+        # Get Groq API key
         self.groq_api_key = (groq_api_key or os.getenv("GROQ_API_KEY", "")).strip()
-        self.openrouter_api_key = (openrouter_api_key or os.getenv("OPENROUTER_API_KEY", "")).strip()
-        self.use_groq = use_groq
 
-        if not self.groq_api_key and not self.openrouter_api_key:
+        if not self.groq_api_key:
             raise ValueError(
-                "❌ Missing API keys! Set GROQ_API_KEY or OPENROUTER_API_KEY in .env"
+                "❌ Missing GROQ_API_KEY! Get one at https://console.groq.com"
             )
 
-        # Initialize Groq client with error handling
+        # Initialize Groq client
         self.groq_client = None
-        if self.groq_api_key:
-            try:
-                self.groq_client = Groq(api_key=self.groq_api_key)
-                print("✅ Groq client initialized successfully")
-            except Exception as e:
-                print(f"⚠️ Groq client initialization failed: {e}")
-                self.groq_client = None
+        try:
+            self.groq_client = Groq(api_key=self.groq_api_key)
+            print("✅ Groq client initialized successfully")
+        except Exception as e:
+            raise ValueError(f"❌ Failed to initialize Groq client: {e}")
 
         # Initialize embeddings (local, no API needed)
         self.embeddings = HuggingFaceEmbeddings(
@@ -84,8 +74,6 @@ class MultiModalRAGSystem:
         self.id_mapping: Dict[str, List[str]] = {}
 
         print("✅ Multi-Modal RAG System initialized")
-        print(f"   Groq API: {'✓' if self.groq_client else '✗'}")
-        print(f"   OpenRouter API: {'✓' if self.openrouter_api_key else '✗'}")
 
     def ingest_document(self, file_path: str) -> List[Document]:
         """
@@ -320,7 +308,7 @@ class MultiModalRAGSystem:
         messages: List[Dict], 
         model: str = "llama-3.3-70b-versatile",
         temperature: float = 0.3,
-        max_tokens: int = 1024,
+        max_tokens: int = 2048,
     ) -> str:
         """
         Call Groq API using Official SDK (RECOMMENDED - Cleaner & More Reliable)
@@ -363,87 +351,19 @@ class MultiModalRAGSystem:
                 )
             raise RuntimeError(f"❌ Groq API error: {error_msg}")
 
-    def call_openrouter(
-        self, 
-        messages: List[Dict], 
-        model: str = "meta-llama/llama-2-7b-chat",
-        temperature: float = 0.3,
-        max_tokens: int = 1024,
-    ) -> str:
-        """
-        Call OpenRouter API - FIXED VERSION
-        
-        Free Models Available:
-        - meta-llama/llama-2-7b-chat (Reliable free model)
-        - mistralai/mistral-7b-instruct
-        - gryphe/mychoice-13b
-        
-        Args:
-            messages: Chat messages in OpenAI format
-            model: Model identifier
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens to generate
-            
-        Returns:
-            LLM response
-        """
-        if not self.openrouter_api_key:
-            raise ValueError("❌ OPENROUTER_API_KEY not set in environment")
-
-        try:
-            # Use requests as per OpenRouter docs - FIXED
-            response = requests.post(
-                url="https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.openrouter_api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://github.com",
-                    "X-Title": "MultiModal-RAG",  # BUG FIX: Add title
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,  # BUG FIX: Use max_tokens for OpenRouter (not max_completion_tokens)
-                    "top_p": 1.0,  # BUG FIX: Add top_p parameter
-                },
-                timeout=30,
-            )
-
-            if response.status_code == 401:
-                raise RuntimeError(
-                    f"❌ OpenRouter API Error 401: Invalid or expired API key\n"
-                    f"   Get new key: https://openrouter.ai/account/api-keys"
-                )
-            elif response.status_code == 400:
-                error_detail = response.text
-                print(f"⚠️ OpenRouter Response: {error_detail}")
-                raise RuntimeError(f"❌ OpenRouter Bad Request: {error_detail}")
-            
-            response.raise_for_status()
-            data = response.json()
-            return data["choices"][0]["message"]["content"]
-
-        except requests.exceptions.RequestException as e:
-            error_msg = str(e)
-            raise RuntimeError(f"❌ OpenRouter API error: {error_msg}")
-
     def generate_answer(
-        self, query: str, context_docs: List[Document], use_groq: Optional[bool] = None
+        self, query: str, context_docs: List[Document]
     ) -> Dict[str, str]:
         """
-        Generate answer using retrieved documents
+        Generate answer using retrieved documents via Groq
         
         Args:
             query: User query
             context_docs: Retrieved documents
-            use_groq: Use Groq (True) or OpenRouter (False)
             
         Returns:
             Answer with citations
         """
-        use_groq = use_groq if use_groq is not None else self.use_groq
-
         # If no documents, return message
         if not context_docs:
             return {
@@ -478,12 +398,9 @@ Answer:"""
             {"role": "user", "content": user_prompt},
         ]
 
-        # Call LLM with better error handling
+        # Call Groq LLM
         try:
-            if use_groq:
-                answer = self.call_groq(messages)
-            else:
-                answer = self.call_openrouter(messages)
+            answer = self.call_groq(messages)
 
             return {
                 "query": query,
@@ -495,18 +412,17 @@ Answer:"""
             error_msg = str(e)
             return {
                 "query": query,
-                "answer": f"❌ Error generating answer: {error_msg}\n\nTroubleshooting:\n1. Check your API key in .env\n2. Verify API key is valid\n3. Try switching providers (use_groq=False)",
+                "answer": f"❌ Error generating answer: {error_msg}\n\nTroubleshooting:\n1. Check your GROQ_API_KEY in .env\n2. Get a new key at https://console.groq.com",
                 "sources": [],
             }
 
-    def qa_pipeline(self, query: str, k: int = 4, use_groq: Optional[bool] = None) -> Dict:
+    def qa_pipeline(self, query: str, k: int = 4) -> Dict:
         """
         Complete QA pipeline: retrieve → generate
         
         Args:
             query: User question
             k: Number of retrieved documents
-            use_groq: Use Groq or OpenRouter
             
         Returns:
             QA result with answer and sources
@@ -516,7 +432,7 @@ Answer:"""
         context_docs = [doc for doc, score in retrieved]
 
         # Generate
-        result = self.generate_answer(query, context_docs, use_groq)
+        result = self.generate_answer(query, context_docs)
 
         return result
 
@@ -531,7 +447,7 @@ def main():
     try:
         # Initialize
         print("🔌 Initializing RAG System...\n")
-        rag = MultiModalRAGSystem(use_groq=True)
+        rag = MultiModalRAGSystem()
 
         # Example 1: Create sample documents
         sample_docs = [
@@ -577,7 +493,7 @@ def main():
 
         for query in queries:
             print(f"\n❓ Query: {query}")
-            result = rag.qa_pipeline(query, k=3, use_groq=True)
+            result = rag.qa_pipeline(query, k=3)
 
             print(f"\n✅ Answer:")
             print(result["answer"])
