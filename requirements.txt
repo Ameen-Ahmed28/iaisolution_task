@@ -1,0 +1,26 @@
+# Document Processing
+unstructured[pdf,image]
+pdf2image
+pillow
+pdfplumber
+pytesseract
+
+# LLM & Embeddings
+langchain
+langchain-huggingface
+langchain-chroma
+chromadb
+huggingface-hub
+sentence-transformers
+
+# API Clients
+requests
+groq
+
+# Web UI
+streamlit
+
+# Utilities
+python-dotenv
+pydantic
+typing-extensions

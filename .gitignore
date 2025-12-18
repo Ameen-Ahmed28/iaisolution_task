@@ -1,0 +1,18 @@
+# Ignore everything
+*
+
+# Except these files
+!.gitignore
+!app.py
+!multi_modal_rag_system.py
+!requirements.txt
+
+# Common ignores (redundant but explicit)
+__pycache__/
+*.pyc
+*.pyo
+.env
+chroma_db_multimodal/
+temp_upload/
+*.log
+.DS_Store
