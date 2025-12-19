@@ -205,6 +205,63 @@ class MultiModalRAGSystem:
                                 ))
                     except:
                         pass  # Skip if table extraction fails
+                    
+                    # Extract images from PDF page and run OCR
+                    try:
+                        image_list = page.get_images(full=True)
+                        for img_idx, img_info in enumerate(image_list):
+                            try:
+                                # Get image xref (reference)
+                                xref = img_info[0]
+                                
+                                # Extract image bytes
+                                base_image = doc.extract_image(xref)
+                                image_bytes = base_image["image"]
+                                image_ext = base_image["ext"]
+                                width = base_image.get("width", 0)
+                                height = base_image.get("height", 0)
+                                
+                                # Convert to PIL Image for OCR
+                                import io
+                                pil_image = Image.open(io.BytesIO(image_bytes))
+                                
+                                # Run Tesseract OCR on the image
+                                ocr_text = ""
+                                try:
+                                    ocr_text = pytesseract.image_to_string(pil_image)
+                                except Exception as ocr_err:
+                                    print(f"      ⚠️ OCR failed for image {img_idx + 1}: {ocr_err}")
+                                
+                                # Create image description
+                                image_description = f"[Image {img_idx + 1} from Page {page_num + 1}]\n"
+                                image_description += f"Dimensions: {width}x{height} pixels, Format: {image_ext}\n"
+                                
+                                if ocr_text.strip():
+                                    image_description += f"Text extracted from image:\n{ocr_text.strip()}"
+                                else:
+                                    image_description += "No text detected in this image."
+                                
+                                # Add as document
+                                documents.append(Document(
+                                    page_content=image_description,
+                                    metadata={
+                                        "source": file_path.name,
+                                        "element_type": "Image_OCR",
+                                        "page": page_num + 1,
+                                        "image_index": img_idx + 1,
+                                        "image_width": width,
+                                        "image_height": height,
+                                        "image_format": image_ext,
+                                        "has_text": bool(ocr_text.strip()),
+                                        "file_path": str(file_path),
+                                    },
+                                ))
+                                
+                            except Exception as img_err:
+                                print(f"      ⚠️ Could not process image {img_idx + 1}: {img_err}")
+                                
+                    except Exception as img_extract_err:
+                        print(f"   ⚠️ Image extraction failed for page {page_num + 1}: {img_extract_err}")
                 
                 doc.close()
                 
