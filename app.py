@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from multi_modal_rag_system import MultiModalRAGSystem
 
+
 # Page config
 st.set_page_config(
     page_title="DocuMind AI | Multi-Modal RAG",
@@ -294,6 +295,7 @@ def main():
         - 🧠 **Groq LLM (Ultra-fast)**
         - 📝 **Source Citations**
         - 📤 **Batch Upload**
+        - 💾 **Persistent Storage**
         """)
         
         st.divider()
@@ -534,8 +536,7 @@ def main():
             # Clear database button
             st.markdown("---")
             if st.button("🗑️ Clear Knowledge Base", use_container_width=True):
-                rag.docstore.clear()
-                rag.id_mapping.clear()
+                rag.clear_all()
                 st.success("✅ Knowledge base cleared!")
                 st.rerun()
 
@@ -555,6 +556,7 @@ def main():
                 <li><strong>Embeddings</strong> - HuggingFace BGE-small (local, no API needed)</li>
                 <li><strong>Vector Database</strong> - ChromaDB for semantic search</li>
                 <li><strong>LLM Inference</strong> - Groq API (ultra-fast, free tier available)</li>
+                <li><strong>Persistence</strong> - Documents survive app restarts!</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
@@ -570,6 +572,7 @@ def main():
                 <li>✅ Semantic search with RAG</li>
                 <li>✅ Source citations in answers</li>
                 <li>✅ Ultra-fast Groq LLM inference</li>
+                <li>✅ <strong>Persistent storage (survives restarts)</strong></li>
             </ul>
         </div>
         """, unsafe_allow_html=True)

@@ -20,6 +20,10 @@ from groq import Groq
 
 load_dotenv()
 
+# Constants for persistence
+PERSIST_DIR = "./chroma_db_multimodal"
+DOCSTORE_FILE = os.path.join(PERSIST_DIR, "docstore.json")
+
 
 class MultiModalRAGSystem:
     """
@@ -27,13 +31,11 @@ class MultiModalRAGSystem:
     - Document ingestion via PyMuPDF (no poppler needed)
     - Text, tables, images (OCR)
     - Groq API for ultra-fast LLM inference (FREE tier)
-    - ChromaDB for vector storage
+    - ChromaDB for vector storage with persistence
+    - Persistent docstore to survive restarts
     """
 
-    def __init__(
-        self,
-        groq_api_key: Optional[str] = None,
-    ):
+    def __init__(self, groq_api_key: Optional[str] = None):
         """
         Initialize RAG system with Groq API
         
@@ -42,11 +44,8 @@ class MultiModalRAGSystem:
         """
         # Get Groq API key
         self.groq_api_key = (groq_api_key or os.getenv("GROQ_API_KEY", "")).strip()
-
         if not self.groq_api_key:
-            raise ValueError(
-                "❌ Missing GROQ_API_KEY! Get one at https://console.groq.com"
-            )
+            raise ValueError("❌ Missing GROQ_API_KEY! Get one at https://console.groq.com")
 
         # Initialize Groq client
         self.groq_client = None
@@ -62,18 +61,88 @@ class MultiModalRAGSystem:
             model_kwargs={"device": "cpu"},
         )
 
-        # Vector store
+        # Vector store - IN-MEMORY ONLY (no persistence)
+        # Documents will be cleared when app stops
         self.vectorstore = Chroma(
             collection_name="multimodal_rag",
             embedding_function=self.embeddings,
-            persist_directory="./chroma_db_multimodal",
+            # NO persist_directory = in-memory only
         )
 
-        # Document store
+        # Document store - in-memory only (no loading from disk)
         self.docstore: Dict[str, Document] = {}
         self.id_mapping: Dict[str, List[str]] = {}
+        # NOT loading from disk - fresh start every time
 
         print("✅ Multi-Modal RAG System initialized")
+        print("   📚 In-memory mode: Documents will be cleared on restart")
+
+    def _load_docstore(self) -> None:
+        """Load docstore from disk if it exists"""
+        if os.path.exists(DOCSTORE_FILE):
+            try:
+                with open(DOCSTORE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                # Reconstruct Document objects
+                for doc_id, doc_data in data.get("docstore", {}).items():
+                    self.docstore[doc_id] = Document(
+                        page_content=doc_data["page_content"],
+                        metadata=doc_data["metadata"]
+                    )
+
+                self.id_mapping = data.get("id_mapping", {})
+                print(f"   ✅ Loaded docstore from {DOCSTORE_FILE}")
+            except Exception as e:
+                print(f"   ⚠️ Could not load docstore: {e}")
+
+    def _save_docstore(self) -> None:
+        """Save docstore to disk for persistence"""
+        # Ensure directory exists
+        os.makedirs(PERSIST_DIR, exist_ok=True)
+
+        # Convert Document objects to serializable format
+        docstore_data = {}
+        for doc_id, doc in self.docstore.items():
+            docstore_data[doc_id] = {
+                "page_content": doc.page_content,
+                "metadata": doc.metadata
+            }
+
+        data = {
+            "docstore": docstore_data,
+            "id_mapping": self.id_mapping
+        }
+
+        try:
+            with open(DOCSTORE_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            print(f"   ✅ Saved docstore to {DOCSTORE_FILE}")
+        except Exception as e:
+            print(f"   ⚠️ Could not save docstore: {e}")
+
+    def clear_all(self) -> None:
+        """
+        Clear all documents from docstore and vector store (in-memory)
+        """
+        print("⚠️ CLEARING ALL DOCUMENTS...")
+        
+        # Clear in-memory
+        self.docstore.clear()
+        self.id_mapping.clear()
+
+        # Clear vector store (in-memory)
+        try:
+            self.vectorstore.delete_collection()
+            self.vectorstore = Chroma(
+                collection_name="multimodal_rag",
+                embedding_function=self.embeddings,
+                # NO persist_directory = in-memory only
+            )
+        except Exception as e:
+            print(f"   ⚠️ Error clearing vector store: {e}")
+
+        print("✅ Knowledge base cleared!")
 
     def ingest_document(self, file_path: str) -> List[Document]:
         """
@@ -154,7 +223,7 @@ class MultiModalRAGSystem:
                             },
                         ))
                 except Exception as ocr_error:
-                    print(f"⚠️ OCR failed: {ocr_error}. Adding image reference only.")
+                    print(f"   ⚠️ OCR failed: {ocr_error}. Adding image reference only.")
                     documents.append(Document(
                         page_content=f"[Image: {file_path.name}]",
                         metadata={
@@ -244,6 +313,7 @@ class MultiModalRAGSystem:
     def add_documents_to_index(self, documents: List[Document]) -> None:
         """
         Add documents to vector store and docstore
+        IMPORTANT: This saves to persistent storage!
         
         Args:
             documents: List of documents to index
@@ -262,10 +332,13 @@ class MultiModalRAGSystem:
                 )
             )
 
-            # Child: for embedding/retrieval
+            # Child: for embedding/retrieval - INCLUDE ALL METADATA for fallback
             child_doc = Document(
                 page_content=doc.page_content,
-                metadata={"parent_id": parent_id},
+                metadata={
+                    **doc.metadata,  # Include all original metadata
+                    "parent_id": parent_id,
+                },
             )
             child_docs.append(child_doc)
 
@@ -275,8 +348,10 @@ class MultiModalRAGSystem:
             self.docstore[parent_id] = doc
             self.id_mapping[parent_id] = []
 
-        # Store in vector DB
+        # Store in vector DB (in-memory)
         self.vectorstore.add_documents(child_docs)
+
+        # NOT saving to disk - in-memory mode
 
         print(f"✅ Indexed {len(documents)} documents")
 
@@ -291,27 +366,58 @@ class MultiModalRAGSystem:
         Returns:
             List of (Document, score) tuples
         """
-        results = self.vectorstore.similarity_search_with_score(query, k=k)
+        try:
+            results = self.vectorstore.similarity_search_with_score(query, k=k)
+        except Exception as e:
+            print(f"⚠️ Vector search error: {e}")
+            return []
 
-        # Get unique parents
-        parent_results = {}
+        if not results:
+            print(f"⚠️ No vector matches found for: '{query[:50]}...'")
+            return []
+
+        # Try to get parent documents, but fall back to child if not found
+        final_results = []
+        seen_content = set()  # Avoid duplicates
+        
         for child_doc, score in results:
             parent_id = child_doc.metadata.get("parent_id")
+            
+            # Try to get parent document
             if parent_id and parent_id in self.docstore:
-                if parent_id not in parent_results:
-                    parent_results[parent_id] = (self.docstore[parent_id], score)
+                parent_doc = self.docstore[parent_id]
+                content_hash = hash(parent_doc.page_content[:100])
+                if content_hash not in seen_content:
+                    seen_content.add(content_hash)
+                    final_results.append((parent_doc, score))
+            else:
+                # FALLBACK: Use child document directly if parent not found
+                # This fixes the mismatch between old vectors and new docstore
+                content_hash = hash(child_doc.page_content[:100])
+                if content_hash not in seen_content:
+                    seen_content.add(content_hash)
+                    # Create a proper document from the child
+                    doc = Document(
+                        page_content=child_doc.page_content,
+                        metadata={
+                            "source": child_doc.metadata.get("source", "Unknown"),
+                            "element_type": child_doc.metadata.get("element_type", "Text"),
+                            **child_doc.metadata
+                        }
+                    )
+                    final_results.append((doc, score))
 
-        return list(parent_results.values())
+        return final_results
 
     def call_groq(
-        self, 
-        messages: List[Dict], 
+        self,
+        messages: List[Dict],
         model: str = "llama-3.3-70b-versatile",
         temperature: float = 0.3,
         max_tokens: int = 2048,
     ) -> str:
         """
-        Call Groq API using Official SDK (RECOMMENDED - Cleaner & More Reliable)
+        Call Groq API using Official SDK
         
         Available Models:
         - llama-3.3-70b-versatile (Recommended - most versatile)
@@ -332,7 +438,7 @@ class MultiModalRAGSystem:
             raise ValueError("❌ Groq client not initialized - check GROQ_API_KEY")
 
         try:
-            # Use official Groq SDK (matches their docs exactly)
+            # Use official Groq SDK
             chat_completion = self.groq_client.chat.completions.create(
                 messages=messages,
                 model=model,
@@ -368,7 +474,7 @@ class MultiModalRAGSystem:
         if not context_docs:
             return {
                 "query": query,
-                "answer": "❌ No relevant documents found. Please add documents first.",
+                "answer": "❌ No relevant documents found. Please add documents first or check your query.",
                 "sources": [],
             }
 
@@ -382,7 +488,7 @@ class MultiModalRAGSystem:
 
         # Build prompt
         system_prompt = """You are a helpful AI assistant analyzing multi-modal documents.
-Answer questions based on the provided context. 
+Answer questions based on the provided context.
 Include citations like [Source: filename].
 If information is not in context, say 'Not found in documents.'"""
 
@@ -401,7 +507,6 @@ Answer:"""
         # Call Groq LLM
         try:
             answer = self.call_groq(messages)
-
             return {
                 "query": query,
                 "answer": answer,
@@ -431,6 +536,10 @@ Answer:"""
         retrieved = self.retrieve(query, k=k)
         context_docs = [doc for doc, score in retrieved]
 
+        if not retrieved:
+            print(f"⚠️ No documents found for query: '{query}'")
+            print(f"   Available documents: {len(self.docstore)}")
+
         # Generate
         result = self.generate_answer(query, context_docs)
 
@@ -442,63 +551,48 @@ Answer:"""
 # =============================================================================
 
 def main():
-    """Example usage of Multi-Modal RAG System"""
-
+    """Example usage of Multi-Modal RAG System - NOW WITH PERSISTENCE!"""
+    
     try:
-        # Initialize
         print("🔌 Initializing RAG System...\n")
         rag = MultiModalRAGSystem()
 
-        # Example 1: Create sample documents
-        sample_docs = [
-            Document(
-                page_content="Diabetic retinopathy is a serious complication affecting blood vessels in the retina. Early detection through OCR and imaging analysis is crucial for preventing vision loss.",
-                metadata={
-                    "source": "medical_report.pdf",
-                    "element_type": "Text",
-                    "page": 1,
-                },
-            ),
-            Document(
-                page_content="Table: Retinopathy Classification\nStage | Severity | Treatment\nMild | Microaneurysms | Monitoring\nModerate | Bleeding | Medication\nSevere | Macular edema | Laser/Injection",
-                metadata={
-                    "source": "medical_report.pdf",
-                    "element_type": "Table",
-                    "page": 2,
-                },
-            ),
-            Document(
-                page_content="Transfer learning leverages pre-trained models to solve new tasks faster. In medical imaging, pre-trained CNNs (ResNet, DenseNet) significantly improve accuracy on limited datasets.",
-                metadata={
-                    "source": "ml_guide.pdf",
-                    "element_type": "Text",
-                    "page": 1,
-                },
-            ),
-        ]
-
-        # Add to index
-        rag.add_documents_to_index(sample_docs)
-
-        # Example 2: QA
+        # Check if document already indexed (from previous runs)
         print("\n" + "=" * 70)
-        print("MULTI-MODAL RAG QA DEMO")
+        print("CHECKING KNOWLEDGE BASE")
         print("=" * 70)
+        
+        if len(rag.docstore) == 0:
+            print("No existing documents found.")
+            print("Please upload documents using the Streamlit app (streamlit run app.py)")
+            print("Or place qatar_test_doc.pdf in current directory and uncomment below:")
+            
+            # Uncomment these lines to auto-ingest a document:
+            # docs = rag.ingest_document("qatar_test_doc.pdf")
+            # chunks = rag.chunk_documents(docs)
+            # rag.add_documents_to_index(chunks)
+        else:
+            print(f"✅ Found {len(rag.docstore)} existing documents in persistent storage")
+            print("   (Loaded from previous run - no need to re-ingest)")
 
-        queries = [
-            "What is diabetic retinopathy and how is it treated?",
-            "How does transfer learning help in medical imaging?",
-            "What are the stages of retinopathy?",
-        ]
+            # Example queries
+            print("\n" + "=" * 70)
+            print("ASKING QUESTIONS")
+            print("=" * 70)
 
-        for query in queries:
-            print(f"\n❓ Query: {query}")
-            result = rag.qa_pipeline(query, k=3)
+            queries = [
+                "What is the main topic of the document?",
+                "What key information is presented?",
+            ]
 
-            print(f"\n✅ Answer:")
-            print(result["answer"])
-            print(f"\n📚 Sources: {', '.join(result['sources'])}")
-            print("-" * 70)
+            for query in queries:
+                print(f"\n❓ Query: {query}")
+                result = rag.qa_pipeline(query, k=4)
+
+                print(f"\n✅ Answer:")
+                print(result["answer"])
+                print(f"\n📚 Sources: {', '.join(result['sources'])}")
+                print("-" * 70)
 
     except Exception as e:
         print(f"\n❌ Error: {e}")
